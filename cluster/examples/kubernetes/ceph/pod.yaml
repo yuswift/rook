@@ -1,0 +1,64 @@
+ apiVersion: storage.k8s.io/v1
+ kind: StorageClass
+ metadata:
+   name: cephrbd
+ provisioner: rook-ceph.rbd.csi.ceph.com
+ parameters:
+   # clusterID is the namespace where operator is deployed.
+   clusterID: rook-ceph
+
+   # CephFS filesystem name into which the volume shall be created
+   fsName: xfs
+
+   # Ceph pool into which the volume shall be created
+   # Required for provisionVolume: "true"
+   pool: replicapool
+
+   # Root path of an existing CephFS volume
+   # Required for provisionVolume: "false"
+   # rootPath: /absolute/path
+
+   # The secrets contain Ceph admin credentials. These are generated automatically by the operator
+   # in the same namespace as the cluster.
+   csi.storage.k8s.io/provisioner-secret-name: rook-ceph-csi
+   csi.storage.k8s.io/provisioner-secret-namespace: rook-ceph
+   csi.storage.k8s.io/node-stage-secret-name: rook-ceph-csi
+   csi.storage.k8s.io/node-stage-secret-namespace: rook-ceph
+
+   # (optional) The driver can use either ceph-fuse (fuse) or ceph kernel client (kernel)
+   # If omitted, default volume mounter will be used - this is determined by probing for ceph-fuse
+   # or by setting the default mounter explicitly via --volumemounter command-line argument.
+   # mounter: kernel
+ #reclaimPolicy: Delete
+ #mountOptions:
+   # uncomment the following line for debugging
+   #- debug
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cephrbd-pvc
+spec:
+  accessModes:
+  - ReadOnlyMany
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: cephrbd
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-cephrbd
+spec:
+  containers:
+   - name: web-server
+     image: r.qihoo.cloud/library/nginx:1.15.5
+     volumeMounts:
+       - name: mypvc
+         mountPath: /var/lib/www/html
+  volumes:
+   - name: mypvc
+     persistentVolumeClaim:
+       claimName: cephrbd-pvc
+       readOnly: false
