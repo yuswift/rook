@@ -1,4 +1,6 @@
-基于rook v1.2.3 & gaozhiwen改过的镜像 参考https://rook.io/docs/rook/v1.2/ceph-cluster-crd.html#external-cluster 使用外部ceph rbd集群 只测了rbd
+基于rook v1.2.3 & gaozhiwen改过的镜像 参考https://rook.io/docs/rook/v1.2/ceph-cluster-crd.html#external-cluster  https://rook.io/docs/rook/v1.2/ceph-block.html
+使用外部ceph rbd集群 只测了rbd
+
 
 ## workdir cluster/examples/kubernetes/ceph
 
