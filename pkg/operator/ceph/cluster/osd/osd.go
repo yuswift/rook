@@ -29,14 +29,14 @@ import (
 	"github.com/coreos/pkg/capnslog"
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	rookalpha "github.com/rook/rook/pkg/apis/rook.io/v1alpha2"
+	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
 	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/mon"
 	osdconfig "github.com/rook/rook/pkg/operator/ceph/cluster/osd/config"
 	opconfig "github.com/rook/rook/pkg/operator/ceph/config"
-	opspec "github.com/rook/rook/pkg/operator/ceph/spec"
+	"github.com/rook/rook/pkg/operator/ceph/controller"
 	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	apps "k8s.io/api/apps/v1"
@@ -69,6 +69,8 @@ const (
 	unknownID                           = -1
 	portableKey                         = "portable"
 	cephOsdPodMinimumMemory      uint64 = 2048 // minimum amount of memory in MB to run the pod
+	bluestorePVCMetadata                = "metadata"
+	bluestorePVCBlock                   = "data"
 )
 
 // Cluster keeps track of the OSDs
@@ -76,13 +78,13 @@ type Cluster struct {
 	clusterInfo                                *cephconfig.ClusterInfo
 	context                                    *clusterd.Context
 	Namespace                                  string
-	placement                                  rookalpha.Placement
-	annotations                                rookalpha.Annotations
+	placement                                  rookv1.Placement
+	annotations                                rookv1.Annotations
 	Keyring                                    string
 	rookVersion                                string
 	cephVersion                                cephv1.CephVersionSpec
-	DesiredStorage                             rookalpha.StorageScopeSpec // user-defined storage scope spec
-	ValidStorage                               rookalpha.StorageScopeSpec // valid subset of `Storage`, computed at runtime
+	DesiredStorage                             rookv1.StorageScopeSpec // user-defined storage scope spec
+	ValidStorage                               rookv1.StorageScopeSpec // valid subset of `Storage`, computed at runtime
 	dataDirHostPath                            string
 	Network                                    cephv1.NetworkSpec
 	resources                                  v1.ResourceRequirements
@@ -101,10 +103,10 @@ func New(
 	namespace string,
 	rookVersion string,
 	cephVersion cephv1.CephVersionSpec,
-	storageSpec rookalpha.StorageScopeSpec,
+	storageSpec rookv1.StorageScopeSpec,
 	dataDirHostPath string,
-	placement rookalpha.Placement,
-	annotations rookalpha.Annotations,
+	placement rookv1.Placement,
+	annotations rookv1.Annotations,
 	network cephv1.NetworkSpec,
 	resources v1.ResourceRequirements,
 	prepareResources v1.ResourceRequirements,
@@ -142,6 +144,7 @@ type OSDInfo struct {
 	DevicePartUUID string `json:"device-part-uuid"`
 	// BlockPath is the logical Volume path for an OSD created by Ceph-volume with format '/dev/<Volume Group>/<Logical Volume>' or simply /dev/vdb if block mode is used
 	BlockPath     string `json:"lv-path"`
+	MetadataPath  string `json:"metadata-path"`
 	SkipLVRelease bool   `json:"skip-lv-release"`
 	Location      string `json:"location"`
 	LVBackedPV    bool   `json:"lv-backed-pv"`
@@ -160,16 +163,18 @@ type OrchestrationStatus struct {
 type osdProperties struct {
 	//crushHostname refers to the hostname or PVC name when the OSD is provisioned on Nodes or PVC block device, respectively.
 	crushHostname       string
-	devices             []rookalpha.Device
+	devices             []rookv1.Device
 	pvc                 v1.PersistentVolumeClaimVolumeSource
-	selection           rookalpha.Selection
+	metadataPVC         v1.PersistentVolumeClaimVolumeSource
+	selection           rookv1.Selection
 	resources           v1.ResourceRequirements
 	storeConfig         osdconfig.StoreConfig
-	placement           rookalpha.Placement
+	placement           rookv1.Placement
 	metadataDevice      string
 	location            string
 	portable            bool
 	tuneSlowDeviceClass bool
+	crushDeviceClass    string
 }
 
 // Start the osd management
@@ -177,9 +182,9 @@ func (c *Cluster) Start() error {
 	config := c.newProvisionConfig()
 
 	// Validate pod's memory if specified
-	err := opspec.CheckPodMemory(c.resources, cephOsdPodMinimumMemory)
+	err := controller.CheckPodMemory(c.resources, cephOsdPodMinimumMemory)
 	if err != nil {
-		return errors.Wrap(err, "error checking pod memory")
+		return errors.Wrap(err, "failed to check pod memory")
 	}
 	logger.Infof("start running osds in namespace %s", c.Namespace)
 
@@ -201,30 +206,9 @@ func (c *Cluster) Start() error {
 
 	// The following block is used to apply any command(s) required by an upgrade
 	// The block below handles the upgrade from Mimic to Nautilus.
-	if c.clusterInfo.CephVersion.IsAtLeastNautilus() {
-		versions, err := client.GetAllCephDaemonVersions(c.context, c.clusterInfo.Name)
-		if err != nil {
-			logger.Warningf("failed to get ceph daemons versions; this likely means there are no osds yet. %v", err)
-		} else {
-			// If length is one, this clearly indicates that all the osds are running the same version
-			// If this is the first time we are creating a cluster length will be 0
-			// On an initial OSD boostrap, by the time we reach this code, the OSDs haven't registered yet
-			// Basically, this task is happening too quickly and OSD pods are not running yet.
-			// That's not an issue since it's an initial bootstrap and not an update.
-			if len(versions.Osd) == 1 {
-				for v := range versions.Osd {
-					osdVersion, err := cephver.ExtractCephVersion(v)
-					if err != nil {
-						return errors.Wrapf(err, "failed to extract ceph version")
-					}
-					// if the version of these OSDs is Nautilus then we run the command
-					if osdVersion.IsAtLeastNautilus() {
-						client.EnableNautilusOSD(c.context, c.Namespace)
-					}
-				}
-			}
-		}
-	}
+	// This should only run before Octopus
+	c.applyUpgradeOSDFunctionality()
+
 	logger.Infof("completed running osds in namespace %s", c.Namespace)
 	return nil
 }
@@ -252,14 +236,51 @@ func (c *Cluster) startProvisioningOverPVCs(config *provisionConfig) {
 		return
 	}
 
-	for _, volume := range c.ValidStorage.VolumeSources {
-		osdProps := osdProperties{
-			crushHostname: volume.PersistentVolumeClaimSource.ClaimName,
-			pvc:           volume.PersistentVolumeClaimSource,
-			resources:     volume.Resources,
-			placement:     volume.Placement,
-			portable:      volume.Portable,
+	for i, volume := range c.ValidStorage.VolumeSources {
+		// If the metadata template is first, we fail and assume we cannot build the data/metadata block relationship
+		if i == 0 && volume.Type == bluestorePVCMetadata {
+			config.addError("wrong template ordering, the %q device must be declared after the %q device.", bluestorePVCMetadata, bluestorePVCBlock)
+			return
 		}
+
+		metadataDevicePVCSource := v1.PersistentVolumeClaimVolumeSource{}
+
+		// If the volumeTemplate is unknown we do nothing
+		if volume.Type != bluestorePVCMetadata && volume.Type != bluestorePVCBlock {
+			logger.Errorf("unknown PVC template type %q, valid names are %q for the main OSD block and %q for a metadata device to back the OSD.", volume.Type, bluestorePVCBlock, bluestorePVCMetadata)
+			continue
+		}
+
+		// We don't need to use the metadata devices as OSDs
+		// They are just attached to OSD and field in their property
+		if volume.Type == bluestorePVCMetadata {
+			logger.Infof("PVC %q is not an OSD but a %q device", volume.PersistentVolumeClaimSource.ClaimName, volume.Type)
+			continue
+		}
+
+		// Let's see how the next PVC looks like
+		// If the next PVC has been identified as a PVC let's attached to this OSD property
+		//
+		// The logic will get a bit more complex if we plan support for a third device for "block.wal"
+		m := i + 1
+		if m < len(c.ValidStorage.VolumeSources) {
+			if c.ValidStorage.VolumeSources[m].Type == bluestorePVCMetadata {
+				logger.Infof("OSD will have its main bluestore block on %q and its metadata device on %q", volume.PersistentVolumeClaimSource.ClaimName, c.ValidStorage.VolumeSources[m].PersistentVolumeClaimSource.ClaimName)
+				metadataDevicePVCSource = c.ValidStorage.VolumeSources[m].PersistentVolumeClaimSource
+			}
+		}
+
+		osdProps := osdProperties{
+			crushHostname:    volume.PersistentVolumeClaimSource.ClaimName,
+			pvc:              volume.PersistentVolumeClaimSource,
+			metadataPVC:      metadataDevicePVCSource,
+			resources:        volume.Resources,
+			placement:        volume.Placement,
+			portable:         volume.Portable,
+			crushDeviceClass: volume.CrushDeviceClass,
+		}
+
+		logger.Debugf("osdProps are %+v", osdProps)
 
 		// Update the orchestration status of this pvc to the starting state
 		status := OrchestrationStatus{Status: OrchestrationStatusStarting, PvcBackedOSD: true}
@@ -337,7 +358,7 @@ func (c *Cluster) startProvisioningOverNodes(config *provisionConfig) {
 		}
 		c.DesiredStorage.Nodes = nil
 		for _, hostname := range hostnameMap {
-			storageNode := rookalpha.Node{
+			storageNode := rookv1.Node{
 				Name: hostname,
 			}
 			c.DesiredStorage.Nodes = append(c.DesiredStorage.Nodes, storageNode)
@@ -452,7 +473,15 @@ func (c *Cluster) startOSDDaemonsOnPVC(pvcName string, config *provisionConfig, 
 
 		dp, err := c.makeDeployment(osdProps, osd, config)
 		if err != nil {
-			errMsg := fmt.Sprintf("failed to create deployment for pvc %q: %v", osdProps.crushHostname, err)
+			errMsg := fmt.Sprintf("failed to create deployment for pvc %q. %v", osdProps.crushHostname, err)
+			config.addError(errMsg)
+			continue
+		}
+
+		// Set the deployment hash as an annotation
+		err = patch.DefaultAnnotator.SetLastAppliedAnnotation(dp)
+		if err != nil {
+			errMsg := fmt.Sprintf("failed to set annotation for deployment %q. %v", dp.Name, err)
 			config.addError(errMsg)
 			continue
 		}
@@ -626,7 +655,7 @@ func (c *Cluster) discoverStorageNodes() (map[string][]*apps.Deployment, error) 
 	return discoveredNodes, nil
 }
 
-func (c *Cluster) resolveNode(nodeName string) *rookalpha.Node {
+func (c *Cluster) resolveNode(nodeName string) *rookv1.Node {
 	// fully resolve the storage config and resources for this node
 	rookNode := c.ValidStorage.ResolveNode(nodeName)
 	if rookNode == nil {
@@ -638,11 +667,23 @@ func (c *Cluster) resolveNode(nodeName string) *rookalpha.Node {
 }
 
 func (c *Cluster) getOSDPropsForPVC(pvcName string) (osdProperties, error) {
-	for _, volumeSource := range c.ValidStorage.VolumeSources {
+	var metadataDevicePVCSource v1.PersistentVolumeClaimVolumeSource
+
+	for i, volumeSource := range c.ValidStorage.VolumeSources {
+		// volumeSource should be consistent and the order always identical so doing the +1 thing shouldn't be too dangerous
 		if pvcName == volumeSource.PersistentVolumeClaimSource.ClaimName {
+			m := i + 1
+			if m < len(c.ValidStorage.VolumeSources) {
+				if c.ValidStorage.VolumeSources[m].Type == bluestorePVCMetadata {
+					logger.Infof("OSD will have its main bluestore block on %q and its metadata device on %q", volumeSource.PersistentVolumeClaimSource.ClaimName, c.ValidStorage.VolumeSources[m].PersistentVolumeClaimSource.ClaimName)
+					metadataDevicePVCSource = c.ValidStorage.VolumeSources[m].PersistentVolumeClaimSource
+				}
+			}
+
 			osdProps := osdProperties{
 				crushHostname:       volumeSource.PersistentVolumeClaimSource.ClaimName,
 				pvc:                 volumeSource.PersistentVolumeClaimSource,
+				metadataPVC:         metadataDevicePVCSource,
 				resources:           volumeSource.Resources,
 				placement:           volumeSource.Placement,
 				portable:            volumeSource.Portable,
@@ -698,6 +739,9 @@ func (c *Cluster) getOSDInfo(d *apps.Deployment) ([]OSDInfo, error) {
 		}
 		if envVar.Name == "ROOK_CV_MODE" {
 			osd.CVMode = envVar.Value
+		}
+		if envVar.Name == "ROOK_METADATA_DEVICE" {
+			osd.MetadataPath = envVar.Value
 		}
 	}
 
@@ -822,4 +866,40 @@ func UpdateLocationWithNodeLabels(location *[]string, nodeLabels map[string]stri
 			client.UpdateCrushMapValue(location, topologyType, topology[topologyType])
 		}
 	}
+}
+
+func (c *Cluster) applyUpgradeOSDFunctionality() {
+	var osdVersion *cephver.CephVersion
+
+	// Get all the daemons versions
+	versions, err := client.GetAllCephDaemonVersions(c.context, c.clusterInfo.Name)
+	if err != nil {
+		logger.Warningf("failed to get ceph daemons versions; this likely means there are no osds yet. %v", err)
+		return
+	}
+
+	// If length is one, this clearly indicates that all the osds are running the same version
+	// If this is the first time we are creating a cluster length will be 0
+	// On an initial OSD boostrap, by the time we reach this code, the OSDs haven't registered yet
+	// Basically, this task is happening too quickly and OSD pods are not running yet.
+	// That's not an issue since it's an initial bootstrap and not an update.
+	if len(versions.Osd) == 1 {
+		for v := range versions.Osd {
+			osdVersion, err = cephver.ExtractCephVersion(v)
+			if err != nil {
+				logger.Warningf("failed to extract ceph version. %v", err)
+				return
+			}
+			// if the version of these OSDs is Octopus then we run the command
+			if osdVersion.IsOctopus() {
+				err = client.EnableReleaseOSDFunctionality(c.context, c.Namespace, "octopus")
+				if err != nil {
+					logger.Warningf("failed to enable new osd functionality. %v", err)
+					return
+				}
+			}
+		}
+	}
+
+	return
 }

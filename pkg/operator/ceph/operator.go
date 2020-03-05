@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/coreos/pkg/capnslog"
 	"github.com/pkg/errors"
@@ -34,11 +35,11 @@ import (
 	"github.com/rook/rook/pkg/operator/ceph/file"
 	"github.com/rook/rook/pkg/operator/ceph/object"
 	objectuser "github.com/rook/rook/pkg/operator/ceph/object/user"
-	"github.com/rook/rook/pkg/operator/ceph/pool"
 	"github.com/rook/rook/pkg/operator/ceph/provisioner"
 	"github.com/rook/rook/pkg/operator/discover"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	v1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/sig-storage-lib-external-provisioner/controller"
 )
 
@@ -61,6 +62,13 @@ var (
 	EnableFlexDriver = true
 	// Whether to enable the daemon for device discovery. If true, the rook-ceph-discover daemonset will be started.
 	EnableDiscoveryDaemon = true
+
+	// ImmediateRetryResult Return this for a immediate retry of the reconciliation loop with the same request object.
+	ImmediateRetryResult = reconcile.Result{Requeue: true}
+	// WaitForRequeueIfCephClusterNotReadyAfter requeue after 10sec if the operator is not ready
+	WaitForRequeueIfCephClusterNotReadyAfter = 10 * time.Second
+	// WaitForRequeueIfCephClusterNotReady waits for the CephCluster to be ready
+	WaitForRequeueIfCephClusterNotReady = reconcile.Result{Requeue: true, RequeueAfter: WaitForRequeueIfCephClusterNotReadyAfter}
 )
 
 // Operator type for managing storage
@@ -78,7 +86,7 @@ type Operator struct {
 
 // New creates an operator instance
 func New(context *clusterd.Context, volumeAttachmentWrapper attachment.Attachment, rookImage, securityAccount string) *Operator {
-	schemes := []k8sutil.CustomResource{cluster.ClusterResource, pool.PoolResource, object.ObjectStoreResource, objectuser.ObjectStoreUserResource,
+	schemes := []k8sutil.CustomResource{cluster.ClusterResource, object.ObjectStoreResource, objectuser.ObjectStoreUserResource,
 		file.FilesystemResource, attachment.VolumeResource}
 
 	operatorNamespace := os.Getenv(k8sutil.PodNamespaceEnvVar)
@@ -92,10 +100,7 @@ func New(context *clusterd.Context, volumeAttachmentWrapper attachment.Attachmen
 	addCallbacks := []func(*cephv1.ClusterSpec) error{
 		o.startSystemDaemons,
 	}
-	removeCallbacks := []func() error{
-		o.stopSystemDaemons,
-	}
-	o.clusterController = cluster.NewClusterController(context, rookImage, volumeAttachmentWrapper, addCallbacks, removeCallbacks)
+	o.clusterController = cluster.NewClusterController(context, rookImage, volumeAttachmentWrapper, addCallbacks)
 	return o
 }
 
@@ -145,7 +150,7 @@ func (o *Operator) Run() error {
 	}
 
 	// Start the controller-runtime Manager.
-	go o.startManager(stopChan)
+	go o.startManager(namespaceToWatch, stopChan)
 
 	// watch for changes to the rook clusters
 	o.clusterController.StartWatch(namespaceToWatch, stopChan)
@@ -199,33 +204,15 @@ func (o *Operator) startSystemDaemons(clusterSpec *cephv1.ClusterSpec) error {
 		return errors.Wrapf(err, "invalid csi params")
 	}
 
+	if err = csi.ValidateCSIVersion(o.context.Clientset, o.operatorNamespace, o.rookImage, o.securityAccount); err != nil {
+		return errors.Wrap(err, "invalid csi version")
+	}
+
 	if err = csi.StartCSIDrivers(o.operatorNamespace, o.context.Clientset, serverVersion); err != nil {
 		return errors.Wrapf(err, "failed to start Ceph csi drivers")
 	}
 	logger.Infof("successfully started Ceph CSI driver(s)")
 
 	o.delayedDaemonsStarted = true
-	return nil
-}
-
-func (o *Operator) stopSystemDaemons() error {
-	if !o.delayedDaemonsStarted || o.clusterController.GetClusterCount() != 0 {
-		return nil
-	}
-	if o.operatorNamespace == "" {
-		return errors.Errorf("Rook operator namespace is not provided. Expose it via downward API in the rook operator manifest file using environment variable %q", k8sutil.PodNamespaceEnvVar)
-	}
-	// TODO: Add removal of FlexVolume daemons
-	if !csi.CSIEnabled() {
-		logger.Infof("CSI driver is not enabled")
-		return nil
-	}
-
-	if err := csi.StopCSIDrivers(o.operatorNamespace, o.context.Clientset); err != nil {
-		return errors.Wrapf(err, "failed to start Ceph csi drivers")
-	}
-	logger.Infof("successfully stopped Ceph CSI driver(s)")
-
-	o.delayedDaemonsStarted = false
 	return nil
 }

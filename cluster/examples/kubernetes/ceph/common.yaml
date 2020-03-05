@@ -189,7 +189,7 @@ spec:
       JSONPath: .metadata.creationTimestamp
     - name: Phase
       type: string
-      description: Phase 
+      description: Phase
       JSONPath: .status.phase
     - name: Message
       type: string
@@ -261,14 +261,20 @@ spec:
                 replicated:
                   properties:
                     size:
-                      minimum: 1
+                      minimum: 0
                       maximum: 10
                       type: integer
+                    requireSafeReplicaSize:
+                      type: boolean
                 erasureCoded:
                   properties:
                     dataChunks:
+                      minimum: 0
+                      maximum: 10
                       type: integer
                     codingChunks:
+                      minimum: 0
+                      maximum: 10
                       type: integer
             dataPools:
               type: array
@@ -279,14 +285,20 @@ spec:
                   replicated:
                     properties:
                       size:
-                        minimum: 1
+                        minimum: 0
                         maximum: 10
                         type: integer
+                      requireSafeReplicaSize:
+                        type: boolean
                   erasureCoded:
                     properties:
                       dataChunks:
+                        minimum: 0
+                        maximum: 10
                         type: integer
                       codingChunks:
+                        minimum: 0
+                        maximum: 10
                         type: integer
             preservePoolsOnDelete:
               type: boolean
@@ -435,6 +447,33 @@ spec:
     singular: cephblockpool
   scope: Namespaced
   version: v1
+  validation:
+    openAPIV3Schema:
+      properties:
+        spec:
+          properties:
+            failureDomain:
+                type: string
+            replicated:
+              properties:
+                size:
+                  type: integer
+                  minimum: 0
+                  maximum: 9
+                targetSizeRatio:
+                  type: number
+                requireSafeReplicaSize:
+                  type: boolean
+            erasureCoded:
+              properties:
+                dataChunks:
+                  type: integer
+                  minimum: 0
+                  maximum: 9
+                codingChunks:
+                  type: integer
+                  minimum: 0
+                  maximum: 9
 # OLM: END CEPH BLOCK POOL CRD
 # OLM: BEGIN CEPH VOLUME POOL CRD
 ---

@@ -24,13 +24,13 @@ import (
 	"github.com/coreos/pkg/capnslog"
 	"github.com/pkg/errors"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	rookalpha "github.com/rook/rook/pkg/apis/rook.io/v1alpha2"
+	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
 	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/mon"
 	"github.com/rook/rook/pkg/operator/ceph/config"
-	opspec "github.com/rook/rook/pkg/operator/ceph/spec"
+	"github.com/rook/rook/pkg/operator/ceph/controller"
 	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	v1 "k8s.io/api/core/v1"
@@ -51,8 +51,8 @@ const (
 type Mirroring struct {
 	ClusterInfo       *cephconfig.ClusterInfo
 	Namespace         string
-	placement         rookalpha.Placement
-	annotations       rookalpha.Annotations
+	placement         rookv1.Placement
+	annotations       rookv1.Annotations
 	context           *clusterd.Context
 	resources         v1.ResourceRequirements
 	priorityClassName string
@@ -71,8 +71,8 @@ func New(
 	context *clusterd.Context,
 	namespace, rookVersion string,
 	cephVersion cephv1.CephVersionSpec,
-	placement rookalpha.Placement,
-	annotations rookalpha.Annotations,
+	placement rookv1.Placement,
+	annotations rookv1.Annotations,
 	network cephv1.NetworkSpec,
 	spec cephv1.RBDMirroringSpec,
 	resources v1.ResourceRequirements,
@@ -104,7 +104,7 @@ var updateDeploymentAndWait = mon.UpdateCephDeploymentAndWait
 // Start begins the process of running rbd mirroring daemons.
 func (m *Mirroring) Start() error {
 	// Validate pod's memory if specified
-	err := opspec.CheckPodMemory(m.resources, cephRbdMirrorPodMinimumMemory)
+	err := controller.CheckPodMemory(m.resources, cephRbdMirrorPodMinimumMemory)
 	if err != nil {
 		return errors.Wrap(err, "error checking pod memory")
 	}

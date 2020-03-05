@@ -27,7 +27,7 @@ import (
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
-	cephspec "github.com/rook/rook/pkg/operator/ceph/spec"
+	"github.com/rook/rook/pkg/operator/ceph/controller"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
@@ -78,7 +78,7 @@ func NewFilesystemController(
 }
 
 // StartWatch watches for instances of Filesystem custom resources and acts on them
-func (c *FilesystemController) StartWatch(namespace string, stopCh chan struct{}) error {
+func (c *FilesystemController) StartWatch(namespace string, stopCh chan struct{}) {
 
 	resourceHandlerFuncs := cache.ResourceEventHandlerFuncs{
 		AddFunc:    c.onAdd,
@@ -88,7 +88,6 @@ func (c *FilesystemController) StartWatch(namespace string, stopCh chan struct{}
 
 	logger.Infof("start watching filesystem resource in namespace %s", c.namespace)
 	go k8sutil.WatchCR(FilesystemResource, namespace, resourceHandlerFuncs, c.context.RookClientset.CephV1().RESTClient(), &cephv1.CephFilesystem{}, stopCh)
-	return nil
 }
 
 func (c *FilesystemController) onAdd(obj interface{}) {
@@ -108,7 +107,7 @@ func (c *FilesystemController) onAdd(obj interface{}) {
 	defer c.releaseOrchestrationLock()
 
 	if c.clusterSpec.External.Enable {
-		_, err := cephspec.ValidateCephVersionsBetweenLocalAndExternalClusters(c.context, c.namespace, c.clusterInfo.CephVersion)
+		_, err := controller.ValidateCephVersionsBetweenLocalAndExternalClusters(c.context, c.namespace, c.clusterInfo.CephVersion)
 		if err != nil {
 			// This handles the case where the operator is running, the external cluster has been upgraded and a CR creation is called
 			// If that's a major version upgrade we fail, if it's a minor version, we continue, it's not ideal but not critical
@@ -170,6 +169,7 @@ func (c *FilesystemController) ParentClusterChanged(cluster cephv1.ClusterSpec, 
 		return
 	}
 
+	logger.Infof("waiting for the orchestration lock to update the filesystem")
 	c.acquireOrchestrationLock()
 	defer c.releaseOrchestrationLock()
 

@@ -23,7 +23,6 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/rook/rook/pkg/clusterd"
-	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 )
 
 var (
@@ -63,7 +62,7 @@ func MgrDisableModule(context *clusterd.Context, clusterName, name string) error
 }
 
 // MgrSetConfig applies a setting for a single mgr daemon
-func MgrSetConfig(context *clusterd.Context, clusterName, mgrName string, cephVersion cephver.CephVersion, key, val string, force bool) (bool, error) {
+func MgrSetConfig(context *clusterd.Context, clusterName, mgrName string, key, val string, force bool) (bool, error) {
 	var getArgs, setArgs []string
 	mgrID := fmt.Sprintf("mgr.%s", mgrName)
 	getArgs = append(getArgs, "config", "get", mgrID, key)
@@ -72,7 +71,7 @@ func MgrSetConfig(context *clusterd.Context, clusterName, mgrName string, cephVe
 	} else {
 		setArgs = append(setArgs, "config", "set", mgrID, key, val)
 	}
-	if force && cephVersion.IsAtLeastNautilus() {
+	if force {
 		setArgs = append(setArgs, "--force")
 	}
 
@@ -128,7 +127,7 @@ func setBalancerMode(context *clusterd.Context, clusterName, mode string) error 
 
 // SetMinCompatClientLuminous set the minimum compatibility for clients to Luminous
 func SetMinCompatClientLuminous(context *clusterd.Context, clusterName string) error {
-	args := []string{"osd", "set-require-min-compat-client", "luminous"}
+	args := []string{"osd", "set-require-min-compat-client", "luminous", "--yes-i-really-mean-it"}
 	_, err := NewCephCommand(context, clusterName, args).Run()
 	if err != nil {
 		return errors.Wrap(err, "failed to set set-require-min-compat-client to luminous")

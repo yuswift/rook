@@ -32,7 +32,7 @@ spec:
           requests:
             storage: 10Gi
   cephVersion:
-    image: ceph/ceph:v14.2.6
+    image: ceph/ceph:v14.2.7
     allowUnsupported: false
   skipUpgradeChecks: false
   continueUpgradeAfterChecksEvenIfNotHealthy: false
@@ -91,6 +91,9 @@ spec:
       volumeClaimTemplates:
       - metadata:
           name: data
+          # if you are looking at giving your OSD a different CRUSH device class than the one detected by Ceph
+          # annotations:
+          #   crushDeviceClass: hybrid
         spec:
           resources:
             requests:
@@ -100,6 +103,19 @@ spec:
           volumeMode: Block
           accessModes:
             - ReadWriteOnce
+      # dedicated block device to store bluestore database (block.db)
+      # - metadata:
+      #     name: metadata
+      #   spec:
+      #     resources:
+      #       requests:
+      #         # Find the right size https://docs.ceph.com/docs/master/rados/configuration/bluestore-config-ref/#sizing
+      #         storage: 5Gi
+      #     # IMPORTANT: Change the storage class depending on your environment (e.g. local-storage, gp2)
+      #     storageClassName: gp2
+      #     volumeMode: Block
+      #     accessModes:
+      #       - ReadWriteOnce
   disruptionManagement:
     managePodBudgets: false
     osdMaintenanceTimeout: 30

@@ -26,7 +26,7 @@ import (
 	"github.com/rook/rook/pkg/daemon/ceph/client"
 	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
 	cephutil "github.com/rook/rook/pkg/daemon/ceph/util"
-	cephspec "github.com/rook/rook/pkg/operator/ceph/spec"
+	"github.com/rook/rook/pkg/operator/ceph/controller"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -83,7 +83,7 @@ func (c *Cluster) checkHealth() error {
 
 	// connect to the mons
 	// get the status and check for quorum
-	quorumStatus, err := client.GetMonQuorumStatus(c.context, c.ClusterInfo.Name, true)
+	quorumStatus, err := client.GetMonQuorumStatus(c.context, c.ClusterInfo.Name, client.IsDebugLevel())
 	if err != nil {
 		return errors.Wrapf(err, "failed to get mon quorum status")
 	}
@@ -117,7 +117,9 @@ func (c *Cluster) checkHealth() error {
 			// enough mons, remove it else remove it on the next run
 			if inQuorum && len(quorumStatus.MonMap.Mons) > desiredMonCount {
 				logger.Warningf("mon %s not in source of truth but in quorum, removing", mon.Name)
-				c.removeMon(mon.Name)
+				if err := c.removeMon(mon.Name); err != nil {
+					logger.Warningf("failed to remove mon %q. %v", mon.Name, err)
+				}
 			} else {
 				logger.Warningf(
 					"mon %s not in source of truth and not in quorum, not enough mons to remove now (wanted: %d, current: %d)",
@@ -307,7 +309,7 @@ func removeMonitorFromQuorum(context *clusterd.Context, clusterName, name string
 func (c *Cluster) handleExternalMonStatus(status client.MonStatusResponse) error {
 	// We don't need to validate Ceph version if no image is present
 	if c.spec.CephVersion.Image == "" {
-		_, err := cephspec.ValidateCephVersionsBetweenLocalAndExternalClusters(c.context, c.Namespace, c.ClusterInfo.CephVersion)
+		_, err := controller.ValidateCephVersionsBetweenLocalAndExternalClusters(c.context, c.Namespace, c.ClusterInfo.CephVersion)
 		if err != nil {
 			return errors.Wrapf(err, "failed to validate external ceph version")
 		}

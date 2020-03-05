@@ -21,7 +21,7 @@ import (
 	"testing"
 
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	rookalpha "github.com/rook/rook/pkg/apis/rook.io/v1alpha2"
+	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/osd/config"
@@ -40,7 +40,7 @@ func TestPodContainer(t *testing.T) {
 	cluster := &Cluster{Namespace: "myosd", rookVersion: "23", cephVersion: cephv1.CephVersionSpec{}, clusterInfo: &cephconfig.ClusterInfo{}}
 	osdProps := osdProperties{
 		crushHostname: "node",
-		devices:       []rookalpha.Device{},
+		devices:       []rookv1.Device{},
 		resources:     v1.ResourceRequirements{},
 		storeConfig:   config.StoreConfig{},
 	}
@@ -72,11 +72,11 @@ func TestDaemonset(t *testing.T) {
 }
 
 func testPodDevices(t *testing.T, dataDir, deviceName string, allDevices bool) {
-	storageSpec := rookalpha.StorageScopeSpec{
-		Selection: rookalpha.Selection{UseAllDevices: &allDevices, DeviceFilter: deviceName},
-		Nodes:     []rookalpha.Node{{Name: "node1"}},
+	storageSpec := rookv1.StorageScopeSpec{
+		Selection: rookv1.Selection{UseAllDevices: &allDevices, DeviceFilter: deviceName},
+		Nodes:     []rookv1.Node{{Name: "node1"}},
 	}
-	devices := []rookalpha.Device{
+	devices := []rookv1.Device{
 		{Name: deviceName},
 	}
 
@@ -86,7 +86,7 @@ func testPodDevices(t *testing.T, dataDir, deviceName string, allDevices bool) {
 		CephVersion: cephver.Nautilus,
 	}
 	c := New(clusterInfo, &clusterd.Context{Clientset: clientset, ConfigDir: "/var/lib/rook", Executor: &exectest.MockExecutor{}}, "ns", "rook/rook:myversion", cephVersion,
-		storageSpec, dataDir, rookalpha.Placement{}, rookalpha.Annotations{}, cephv1.NetworkSpec{}, v1.ResourceRequirements{}, v1.ResourceRequirements{}, "my-priority-class", metav1.OwnerReference{}, false, false)
+		storageSpec, dataDir, rookv1.Placement{}, rookv1.Annotations{}, cephv1.NetworkSpec{}, v1.ResourceRequirements{}, v1.ResourceRequirements{}, "my-priority-class", metav1.OwnerReference{}, false, false)
 
 	devMountNeeded := deviceName != "" || allDevices
 
@@ -109,6 +109,7 @@ func testPodDevices(t *testing.T, dataDir, deviceName string, allDevices bool) {
 		DataPathMap: opconfig.NewDatalessDaemonDataPathMap(c.Namespace, "/var/lib/rook"),
 	}
 
+	// Test LVM based on OSD on bare metal
 	deployment, err := c.makeDeployment(osdProp, osd, dataPathMap)
 	assert.Nil(t, err)
 	assert.NotNil(t, deployment)
@@ -139,7 +140,7 @@ func testPodDevices(t *testing.T, dataDir, deviceName string, allDevices bool) {
 	assert.Equal(t, 2, len(deployment.Spec.Template.Spec.InitContainers))
 	initCont := deployment.Spec.Template.Spec.InitContainers[0]
 	assert.Equal(t, "ceph/ceph:v12.2.8", initCont.Image)
-	assert.Equal(t, "activate-osd", initCont.Name)
+	assert.Equal(t, "activate", initCont.Name)
 	assert.Equal(t, 3, len(initCont.VolumeMounts))
 
 	assert.Equal(t, 1, len(deployment.Spec.Template.Spec.Containers))
@@ -147,6 +148,76 @@ func testPodDevices(t *testing.T, dataDir, deviceName string, allDevices bool) {
 	assert.Equal(t, cephVersion.Image, cont.Image)
 	assert.Equal(t, 6, len(cont.VolumeMounts))
 	assert.Equal(t, "ceph-osd", cont.Command[0])
+
+	// Test OSD on PVC with LVM
+	osdProp = osdProperties{
+		crushHostname: n.Name,
+		selection:     n.Selection,
+		resources:     v1.ResourceRequirements{},
+		storeConfig:   config.StoreConfig{},
+		pvc:           v1.PersistentVolumeClaimVolumeSource{ClaimName: "mypvc"},
+	}
+	// Not needed when running on PVC
+	osd = OSDInfo{
+		ID:     0,
+		CVMode: "lvm",
+	}
+
+	deployment, err = c.makeDeployment(osdProp, osd, dataPathMap)
+	assert.Nil(t, err)
+	assert.NotNil(t, deployment)
+	assert.Equal(t, 4, len(deployment.Spec.Template.Spec.InitContainers), deployment.Spec.Template.Spec.InitContainers[2].Name)
+	assert.Equal(t, "config-init", deployment.Spec.Template.Spec.InitContainers[0].Name)
+	assert.Equal(t, "copy-bins", deployment.Spec.Template.Spec.InitContainers[1].Name)
+	assert.Equal(t, "blkdevmapper", deployment.Spec.Template.Spec.InitContainers[2].Name)
+	assert.Equal(t, "chown-container-data-dir", deployment.Spec.Template.Spec.InitContainers[3].Name)
+	assert.Equal(t, 1, len(deployment.Spec.Template.Spec.Containers))
+	initCont = deployment.Spec.Template.Spec.InitContainers[0]
+	assert.Equal(t, 4, len(initCont.VolumeMounts), initCont.VolumeMounts)
+	blkInitCont := deployment.Spec.Template.Spec.InitContainers[2]
+	assert.Equal(t, 1, len(blkInitCont.VolumeDevices))
+	cont = deployment.Spec.Template.Spec.Containers[0]
+	assert.Equal(t, 8, len(cont.VolumeMounts), cont.VolumeMounts)
+
+	// Test OSD on PVC with RAW
+	osd = OSDInfo{
+		ID:     0,
+		CVMode: "raw",
+	}
+	deployment, err = c.makeDeployment(osdProp, osd, dataPathMap)
+	assert.Nil(t, err)
+	assert.NotNil(t, deployment)
+	assert.Equal(t, 4, len(deployment.Spec.Template.Spec.InitContainers), deployment.Spec.Template.Spec.InitContainers[2].Name)
+	assert.Equal(t, "blkdevmapper", deployment.Spec.Template.Spec.InitContainers[0].Name)
+	assert.Equal(t, "activate", deployment.Spec.Template.Spec.InitContainers[1].Name)
+	assert.Equal(t, "expand-bluefs", deployment.Spec.Template.Spec.InitContainers[2].Name)
+	assert.Equal(t, "chown-container-data-dir", deployment.Spec.Template.Spec.InitContainers[3].Name)
+	assert.Equal(t, 1, len(deployment.Spec.Template.Spec.Containers))
+	cont = deployment.Spec.Template.Spec.Containers[0]
+	assert.Equal(t, 5, len(cont.VolumeMounts), cont.VolumeMounts)
+
+	// Test OSD on PVC with RAW and metadata device
+	osd = OSDInfo{
+		ID:     0,
+		CVMode: "raw",
+	}
+	osdProp.metadataPVC = v1.PersistentVolumeClaimVolumeSource{ClaimName: "mypvc-metadata"}
+	deployment, err = c.makeDeployment(osdProp, osd, dataPathMap)
+	assert.Nil(t, err)
+	assert.NotNil(t, deployment)
+	assert.Equal(t, 5, len(deployment.Spec.Template.Spec.InitContainers))
+	assert.Equal(t, "blkdevmapper", deployment.Spec.Template.Spec.InitContainers[0].Name)
+	assert.Equal(t, "blkdevmapper-metadata", deployment.Spec.Template.Spec.InitContainers[1].Name)
+	assert.Equal(t, "activate", deployment.Spec.Template.Spec.InitContainers[2].Name)
+	assert.Equal(t, "expand-bluefs", deployment.Spec.Template.Spec.InitContainers[3].Name)
+	assert.Equal(t, "chown-container-data-dir", deployment.Spec.Template.Spec.InitContainers[4].Name)
+	assert.Equal(t, 1, len(deployment.Spec.Template.Spec.Containers))
+	cont = deployment.Spec.Template.Spec.Containers[0]
+	assert.Equal(t, 5, len(cont.VolumeMounts), cont.VolumeMounts)
+	blkInitCont = deployment.Spec.Template.Spec.InitContainers[1]
+	assert.Equal(t, 1, len(blkInitCont.VolumeDevices))
+	blkMetaInitCont := deployment.Spec.Template.Spec.InitContainers[2]
+	assert.Equal(t, 1, len(blkMetaInitCont.VolumeDevices))
 }
 
 func verifyEnvVar(t *testing.T, envVars []v1.EnvVar, expectedName, expectedValue string, expectedFound bool) {
@@ -163,8 +234,8 @@ func verifyEnvVar(t *testing.T, envVars []v1.EnvVar, expectedName, expectedValue
 }
 
 func TestStorageSpecConfig(t *testing.T) {
-	storageSpec := rookalpha.StorageScopeSpec{
-		Nodes: []rookalpha.Node{
+	storageSpec := rookv1.StorageScopeSpec{
+		Nodes: []rookv1.Node{
 			{
 				Name: "node1",
 				Config: map[string]string{
@@ -172,7 +243,7 @@ func TestStorageSpecConfig(t *testing.T) {
 					"walSizeMB":      "20",
 					"metadataDevice": "nvme093",
 				},
-				Selection: rookalpha.Selection{},
+				Selection: rookv1.Selection{},
 				Resources: v1.ResourceRequirements{
 					Limits: v1.ResourceList{
 						v1.ResourceCPU:    *resource.NewQuantity(1024.0, resource.BinarySI),
@@ -192,7 +263,7 @@ func TestStorageSpecConfig(t *testing.T) {
 		CephVersion: cephver.Nautilus,
 	}
 	c := New(clusterInfo, &clusterd.Context{Clientset: clientset, ConfigDir: "/var/lib/rook", Executor: &exectest.MockExecutor{}}, "ns", "rook/rook:myversion", cephv1.CephVersionSpec{},
-		storageSpec, "", rookalpha.Placement{}, rookalpha.Annotations{}, cephv1.NetworkSpec{}, v1.ResourceRequirements{}, v1.ResourceRequirements{}, "my-priority-class", metav1.OwnerReference{}, false, false)
+		storageSpec, "", rookv1.Placement{}, rookv1.Annotations{}, cephv1.NetworkSpec{}, v1.ResourceRequirements{}, v1.ResourceRequirements{}, "my-priority-class", metav1.OwnerReference{}, false, false)
 
 	n := c.DesiredStorage.ResolveNode(storageSpec.Nodes[0].Name)
 	storeConfig := config.ToStoreConfig(storageSpec.Nodes[0].Config)
@@ -225,8 +296,8 @@ func TestStorageSpecConfig(t *testing.T) {
 }
 
 func TestHostNetwork(t *testing.T) {
-	storageSpec := rookalpha.StorageScopeSpec{
-		Nodes: []rookalpha.Node{
+	storageSpec := rookv1.StorageScopeSpec{
+		Nodes: []rookv1.Node{
 			{
 				Name: "node1",
 				Config: map[string]string{
@@ -242,7 +313,7 @@ func TestHostNetwork(t *testing.T) {
 		CephVersion: cephver.Nautilus,
 	}
 	c := New(clusterInfo, &clusterd.Context{Clientset: clientset, ConfigDir: "/var/lib/rook", Executor: &exectest.MockExecutor{}}, "ns", "myversion", cephv1.CephVersionSpec{},
-		storageSpec, "", rookalpha.Placement{}, rookalpha.Annotations{}, cephv1.NetworkSpec{HostNetwork: true}, v1.ResourceRequirements{}, v1.ResourceRequirements{}, "my-priority-class", metav1.OwnerReference{}, false, false)
+		storageSpec, "", rookv1.Placement{}, rookv1.Annotations{}, cephv1.NetworkSpec{HostNetwork: true}, v1.ResourceRequirements{}, v1.ResourceRequirements{}, "my-priority-class", metav1.OwnerReference{}, false, false)
 
 	n := c.DesiredStorage.ResolveNode(storageSpec.Nodes[0].Name)
 	osd := OSDInfo{
@@ -272,23 +343,19 @@ func TestHostNetwork(t *testing.T) {
 
 func TestOsdOnSDNFlag(t *testing.T) {
 	network := cephv1.NetworkSpec{}
-	v := cephver.Mimic
-	args := osdOnSDNFlag(network, v)
+
+	args := osdOnSDNFlag(network)
+	assert.NotEmpty(t, args)
+
+	network.Provider = "host"
+	args = osdOnSDNFlag(network)
 	assert.Empty(t, args)
-
-	v = cephver.CephVersion{Major: 14, Minor: 2, Extra: 2}
-	args = osdOnSDNFlag(network, v)
-	assert.NotEmpty(t, args)
-
-	v = cephver.Octopus
-	args = osdOnSDNFlag(network, v)
-	assert.NotEmpty(t, args)
 }
 
 func TestOsdPrepareResources(t *testing.T) {
 	clientset := fake.NewSimpleClientset()
 	c := New(&cephconfig.ClusterInfo{}, &clusterd.Context{Clientset: clientset, ConfigDir: "/var/lib/rook", Executor: &exectest.MockExecutor{}}, "ns", "myversion", cephv1.CephVersionSpec{},
-		rookalpha.StorageScopeSpec{}, "", rookalpha.Placement{}, rookalpha.Annotations{}, cephv1.NetworkSpec{}, v1.ResourceRequirements{}, v1.ResourceRequirements{}, "my-priority-class", metav1.OwnerReference{}, false, false)
+		rookv1.StorageScopeSpec{}, "", rookv1.Placement{}, rookv1.Annotations{}, cephv1.NetworkSpec{}, v1.ResourceRequirements{}, v1.ResourceRequirements{}, "my-priority-class", metav1.OwnerReference{}, false, false)
 
 	// TEST 2: NOT running on PVC and some prepareResources are specificied
 	rr := v1.ResourceRequirements{

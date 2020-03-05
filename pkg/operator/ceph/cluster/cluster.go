@@ -28,7 +28,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	rookv1alpha2 "github.com/rook/rook/pkg/apis/rook.io/v1alpha2"
+	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
 	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
@@ -38,9 +38,8 @@ import (
 	"github.com/rook/rook/pkg/operator/ceph/cluster/osd"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/rbd"
 	"github.com/rook/rook/pkg/operator/ceph/config"
+	"github.com/rook/rook/pkg/operator/ceph/controller"
 	"github.com/rook/rook/pkg/operator/ceph/csi"
-	cephspec "github.com/rook/rook/pkg/operator/ceph/spec"
-	"github.com/rook/rook/pkg/operator/ceph/version"
 	cephver "github.com/rook/rook/pkg/operator/ceph/version"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -131,12 +130,12 @@ func (c *cluster) detectCephVersion(rookImage, cephImage string, timeout time.Du
 func (c *cluster) validateCephVersion(version *cephver.CephVersion) error {
 	if !c.Spec.External.Enable {
 		if !version.IsAtLeast(cephver.Minimum) {
-			return errors.Errorf("the version does not meet the minimum version: %q", cephver.Minimum.String())
+			return errors.Errorf("the version does not meet the minimum version %q", cephver.Minimum.String())
 		}
 
 		if !version.Supported() {
 			if !c.Spec.CephVersion.AllowUnsupported {
-				return errors.Errorf("allowUnsupported must be set to true to run with this version: %+v", version)
+				return errors.Errorf("allowUnsupported must be set to true to run with this version %q", version.String())
 			}
 			logger.Warningf("unsupported ceph version detected: %q, pursuing", version)
 		}
@@ -164,7 +163,7 @@ func (c *cluster) validateCephVersion(version *cephver.CephVersion) error {
 	}
 
 	if c.Spec.External.Enable && c.Spec.CephVersion.Image != "" {
-		c.Info.CephVersion, err = cephspec.ValidateCephVersionsBetweenLocalAndExternalClusters(c.context, c.Namespace, *version)
+		c.Info.CephVersion, err = controller.ValidateCephVersionsBetweenLocalAndExternalClusters(c.context, c.Namespace, *version)
 		if err != nil {
 			return errors.Wrapf(err, "failed to validate ceph version between external and local")
 		}
@@ -314,7 +313,7 @@ func (c *cluster) doOrchestration(rookImage string, cephVersion cephver.CephVers
 	// Notify the child controllers that the cluster spec might have changed
 	logger.Debug("notifying CR child of the potential upgrade")
 	for _, child := range c.childControllers {
-		child.ParentClusterChanged(*c.Spec, c.Info, c.isUpgrade)
+		go child.ParentClusterChanged(*c.Spec, c.Info, c.isUpgrade)
 	}
 
 	return nil
@@ -323,8 +322,8 @@ func (c *cluster) doOrchestration(rookImage string, cephVersion cephver.CephVers
 func clusterChanged(oldCluster, newCluster cephv1.ClusterSpec, clusterRef *cluster) (bool, string) {
 
 	// sort the nodes by name then compare to see if there are changes
-	sort.Sort(rookv1alpha2.NodesByName(oldCluster.Storage.Nodes))
-	sort.Sort(rookv1alpha2.NodesByName(newCluster.Storage.Nodes))
+	sort.Sort(rookv1.NodesByName(oldCluster.Storage.Nodes))
+	sort.Sort(rookv1.NodesByName(newCluster.Storage.Nodes))
 
 	// any change in the crd will trigger an orchestration
 	if !reflect.DeepEqual(oldCluster, newCluster) {
@@ -432,33 +431,15 @@ func (c *cluster) postMonStartupActions() error {
 		return errors.Wrapf(err, "failed to create csi kubernetes secrets")
 	}
 
-	// Create Crash Collector Secret
-	// In 14.2.5 the crash daemon will read the client.crash key instead of the admin key
-	if c.Info.CephVersion.IsAtLeast(version.CephVersion{Major: 14, Minor: 2, Extra: 5}) {
-		err = crash.CreateCrashCollectorSecret(c.context, c.Namespace, &c.ownerRef)
-		if err != nil {
-			return errors.Wrapf(err, "failed to create crash collector kubernetes secret")
-		}
+	// Create crash collector Kubernetes Secret
+	err = crash.CreateCrashCollectorSecret(c.context, c.Namespace, &c.ownerRef)
+	if err != nil {
+		return errors.Wrapf(err, "failed to create crash collector kubernetes secret")
 	}
 
 	// Enable Ceph messenger 2 protocol on Nautilus
-	if c.Info.CephVersion.IsAtLeastNautilus() {
-		v, err := client.GetCephMonVersion(c.context, c.Info.Name)
-		if err != nil {
-			return errors.Wrapf(err, "failed to get ceph mon version")
-		}
-		if v.IsAtLeastNautilus() {
-			versions, err := client.GetAllCephDaemonVersions(c.context, c.Info.Name)
-			if err != nil {
-				return errors.Wrapf(err, "failed to get ceph daemons versions")
-			}
-			if len(versions.Mon) == 1 {
-				// If length is one, this clearly indicates that all the mons are running the same version
-				// We are doing this because 'ceph version' might return the Ceph version that a majority of mons has but not all of them
-				// so instead of trying to active msgr2 when mons are not ready, we activate it when we believe that's the right time
-				client.EnableMessenger2(c.context, c.Namespace)
-			}
-		}
+	if err := client.EnableMessenger2(c.context, c.Namespace); err != nil {
+		return errors.Wrapf(err, "failed to enable Ceph messenger version 2.")
 	}
 
 	return nil

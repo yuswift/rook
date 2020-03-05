@@ -21,10 +21,10 @@ import (
 	"testing"
 
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
-	rook "github.com/rook/rook/pkg/apis/rook.io/v1alpha2"
+	rookv1 "github.com/rook/rook/pkg/apis/rook.io/v1"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/operator/ceph/config"
-	opspec "github.com/rook/rook/pkg/operator/ceph/spec"
+	"github.com/rook/rook/pkg/operator/ceph/controller"
 	cephtest "github.com/rook/rook/pkg/operator/ceph/test"
 	testop "github.com/rook/rook/pkg/operator/test"
 	"github.com/stretchr/testify/assert"
@@ -41,7 +41,7 @@ func TestPodSpecs(t *testing.T) {
 }
 
 func testPodSpec(t *testing.T, monID string, pvc bool) {
-	clientset := testop.New(1)
+	clientset := testop.New(t, 1)
 	c := New(
 		&clusterd.Context{Clientset: clientset, ConfigDir: "/var/lib/rook"},
 		"ns",
@@ -63,7 +63,7 @@ func testPodSpec(t *testing.T, monID string, pvc bool) {
 			v1.ResourceMemory: *resource.NewQuantity(500.0, resource.BinarySI),
 		},
 	}
-	c.spec.PriorityClassNames = map[rook.KeyType]string{
+	c.spec.PriorityClassNames = map[rookv1.KeyType]string{
 		cephv1.KeyMon: "my-priority-class",
 	}
 	monConfig := testGenMonConfig(monID)
@@ -73,10 +73,10 @@ func testPodSpec(t *testing.T, monID string, pvc bool) {
 
 	if pvc {
 		d.Spec.Template.Spec.Volumes = append(
-			d.Spec.Template.Spec.Volumes, opspec.DaemonVolumesDataPVC("i-am-pvc"))
+			d.Spec.Template.Spec.Volumes, controller.DaemonVolumesDataPVC("i-am-pvc"))
 	} else {
 		d.Spec.Template.Spec.Volumes = append(
-			d.Spec.Template.Spec.Volumes, opspec.DaemonVolumesDataHostPath(monConfig.DataPathMap)...)
+			d.Spec.Template.Spec.Volumes, controller.DaemonVolumesDataHostPath(monConfig.DataPathMap)...)
 	}
 
 	// Deployment should have Ceph labels
@@ -90,7 +90,7 @@ func testPodSpec(t *testing.T, monID string, pvc bool) {
 }
 
 func TestDeploymentPVCSpec(t *testing.T) {
-	clientset := testop.New(1)
+	clientset := testop.New(t, 1)
 	c := New(
 		&clusterd.Context{Clientset: clientset, ConfigDir: "/var/lib/rook"},
 		"ns",

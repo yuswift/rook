@@ -31,7 +31,7 @@ metadata:
 spec:
   cephVersion:
     # see the "Cluster Settings" section below for more details on which image of ceph to run
-    image: ceph/ceph:v14.2.6
+    image: ceph/ceph:v14.2.7
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -52,6 +52,9 @@ metadata:
   name: rook-ceph
   namespace: rook-ceph
 spec:
+  cephVersion:
+    # see the "Cluster Settings" section below for more details on which image of ceph to run
+    image: ceph/ceph:v14.2.7
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -80,6 +83,8 @@ spec:
           accessModes:
             - ReadWriteOnce
 ```
+
+For a more advanced scenario, such as adding a dedicated device you can refer to the [dedicated metadata device for OSD on PVC section](#dedicated-metadata-device-for-osd-on-pvc).
 
 ## Settings
 
@@ -248,7 +253,7 @@ Below are the settings available, both at the cluster and individual node level,
   * `^/dev/sd.`: Selects all devices starting with `sd`
   * `^/dev/disk/by-path/pci-.*`: Selects all devices which are connected to PCI bus
 * `devices`: A list of individual device names belonging to this node to include in the storage cluster.
-  * `name`: The name of the device (e.g., `sda`)
+  * `name`: The name of the device (e.g., `sda`), or full udev path (e.g. `/dev/disk/by-id/ata-ST4000DM004-XXXX` - this will not change after reboots).
   * `config`: Device-specific config settings. See the [config settings](#osd-configuration-settings) below
 * `storageClassDeviceSets`: Explained in [Storage Class Device Sets](#storage-class-device-sets)
 
@@ -389,7 +394,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: ceph/ceph:v14.2.6
+    image: ceph/ceph:v14.2.7
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -421,7 +426,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: ceph/ceph:v14.2.6
+    image: ceph/ceph:v14.2.7
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -440,7 +445,7 @@ spec:
     - name: "172.17.4.201"
       devices:             # specific devices to use for storage can be specified for each node
       - name: "sdb"
-      - name: "sdc"
+      - name: "/dev/disk/by-id/ata-ST4000DM004-XXXX" # both device name and explicit udev links are supported
       config:         # configuration can be specified at the node level which overrides the cluster level config
         storeType: bluestore
     - name: "172.17.4.301"
@@ -461,7 +466,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: ceph/ceph:v14.2.6
+    image: ceph/ceph:v14.2.7
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -508,7 +513,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: ceph/ceph:v14.2.6
+    image: ceph/ceph:v14.2.7
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -606,7 +611,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: ceph/ceph:v14.2.6
+    image: ceph/ceph:v14.2.7
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -652,7 +657,7 @@ spec:
           requests:
             storage: 10Gi
   cephVersion:
-    image: ceph/ceph:v14.2.6
+    image: ceph/ceph:v14.2.7
     allowUnsupported: false
   dashboard:
     enabled: true
@@ -695,6 +700,64 @@ spec:
           accessModes:
             - ReadWriteOnce
 ```
+
+### Dedicated metadata device for OSD on PVC
+
+In the simplest case, Ceph OSD BlueStore consumes a single (primary) storage device.
+BlueStore is the engine used by the OSD to store data.
+
+The storage device is normally used as a whole, occupying the full device that is managed directly by BlueStore.
+It is also possible to deploy BlueStore across additional devices such as a DB device.
+This device can be used for storing BlueStore’s internal metadata.
+BlueStore (or rather, the embedded RocksDB) will put as much metadata as it can on the DB device to improve performance.
+If the DB device fills up, metadata will spill back onto the primary device (where it would have been otherwise).
+Again, it is only helpful to provision a DB device if it is faster than the primary device.
+
+You can have multiple `volumeClaimTemplates` where each might either represent a device or a metadata device.
+So just taking the `storage` section this will give something like:
+
+```yaml
+  storage:
+   storageClassDeviceSets:
+    - name: set1
+      count: 3
+      portable: false
+      tuneSlowDeviceClass: false
+      volumeClaimTemplates:
+      - metadata:
+          name: data
+        spec:
+          resources:
+            requests:
+              storage: 10Gi
+          # IMPORTANT: Change the storage class depending on your environment (e.g. local-storage, gp2)
+          storageClassName: gp2
+          volumeMode: Block
+          accessModes:
+            - ReadWriteOnce
+      - metadata:
+          name: metadata
+        spec:
+          resources:
+            requests:
+              # Find the right size https://docs.ceph.com/docs/mimic/rados/configuration/bluestore-config-ref/#sizing
+              storage: 5Gi
+          # IMPORTANT: Change the storage class depending on your environment (e.g. local-storage, gp2)
+          storageClassName: io1
+          volumeMode: Block
+          accessModes:
+            - ReadWriteOnce
+```
+
+> **NOTE**: Note that Rook only supports two naming convention for a given template:
+
+* "data": represents the main OSD block device, where your data are being stored
+* "metadata": represents the metadata device used to store the Ceph Bluestore database for an OSD.
+It is recommended to use a faster storage class for the metadata device, with a slower device for the data.
+Otherwise, having a separate metadata device will not improve the performance.
+To determine the size of the metadata block follow the [official Ceph sizing guide](https://docs.ceph.com/docs/mimic/rados/configuration/bluestore-config-ref/#sizing).
+
+With the present configuration, each OSD will have its main block allocated a 10GB device as well a 5GB device to act as a bluestore database.
 
 ### External cluster
 
@@ -752,7 +815,7 @@ spec:
   dataDirHostPath: /var/lib/rook
   # providing an image is optional, do this if you want to create other CRs (rgw, mds, nfs)
   cephVersion:
-    image: ceph/ceph:v14.2.6 # MUST match external cluster version
+    image: ceph/ceph:v14.2.7 # MUST match external cluster version
 ```
 
 Choose the namespace carefully, if you have an existing cluster managed by Rook, you have likely already injected `common.yaml`.
